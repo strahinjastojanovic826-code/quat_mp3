@@ -1,0 +1,13 @@
+[package]
+name = "quat_mp3"
+version = "0.1.0"
+edition = "2024"
+authors = ["Strale <strahinjastojanovic826@gmail.com>"]
+description = "MP3 metadata and frame inspector operating on base-4 quaternary logic"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+keywords = ["mp3", "audio", "quaternary", "base4", "codec"]
+categories = ["multimedia::audio", "encoding"]
+
+
+[dependencies]
