@@ -1,10 +1,11 @@
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum QuatError {
     InvalidBufferLength { length: usize },
     InvalidDigitValue(u8),
     IncompleteHeader,
+    Io(std::io::Error),
 }
 
 impl fmt::Display for QuatError {
@@ -19,8 +20,22 @@ impl fmt::Display for QuatError {
             Self::IncompleteHeader => {
                 write!(f, "Buffer is too short to contain a valid MP3 header")
             }
+            Self::Io(err) => write!(f, "I/O error: {err}"),
         }
     }
 }
 
-impl std::error::Error for QuatError {}
+impl std::error::Error for QuatError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for QuatError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}

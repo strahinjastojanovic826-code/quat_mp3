@@ -1,7 +1,7 @@
 use crate::error::QuatError;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Quat {
     Q0 = 0,
@@ -11,15 +11,14 @@ pub enum Quat {
 }
 
 impl Quat {
-    /// Extracts 2 bits from a byte to construct a Quat value.
+    /// Constructs a `Quat` value using the lowest 2 bits.
     #[inline]
     pub const fn from_bits(bits: u8) -> Self {
         match bits & 0b11 {
             0 => Self::Q0,
             1 => Self::Q1,
             2 => Self::Q2,
-            3 => Self::Q3,
-            _ => unreachable!(),
+            _ => Self::Q3,
         }
     }
 
@@ -32,6 +31,7 @@ impl Quat {
 impl TryFrom<u8> for Quat {
     type Error = QuatError;
 
+    #[inline]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Q0),
@@ -40,6 +40,13 @@ impl TryFrom<u8> for Quat {
             3 => Ok(Self::Q3),
             val => Err(QuatError::InvalidDigitValue(val)),
         }
+    }
+}
+
+impl From<Quat> for u8 {
+    #[inline]
+    fn from(q: Quat) -> Self {
+        q.value()
     }
 }
 
