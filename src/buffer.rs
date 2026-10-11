@@ -51,24 +51,23 @@ impl QuatBuffer {
     }
 
     /// Reads from a `std::io::Read` stream and encodes the contents into a `QuatBuffer`.
-     pub fn read_from<R: Read>(mut reader: R) -> Result<Self, QuatError> {
+    pub fn read_from<R: Read>(mut reader: R) -> Result<Self, QuatError> {
+        let mut chunk = [0u8; 1024];
         let mut buffer = Self::new();
-        let mut chunk = [0u8; 1024]; // Bafer od 1 KB
-        
+
         loop {
             let bytes_read = reader.read(&mut chunk)?;
             if bytes_read == 0 {
                 break;
             }
-            
             for &byte in &chunk[..bytes_read] {
-                buffer.push(Quat::from_bits(byte >> 6));
-                buffer.push(Quat::from_bits(byte >> 4));
-                buffer.push(Quat::from_bits(byte >> 2));
-                buffer.push(Quat::from_bits(byte));
+                buffer.quats.push(Quat::from_bits(byte >> 6));
+                buffer.quats.push(Quat::from_bits(byte >> 4));
+                buffer.quats.push(Quat::from_bits(byte >> 2));
+                buffer.quats.push(Quat::from_bits(byte));
             }
         }
-        
+
         Ok(buffer)
     }
 

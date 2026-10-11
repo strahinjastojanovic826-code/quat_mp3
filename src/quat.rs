@@ -22,6 +22,7 @@ impl Quat {
         }
     }
 
+    /// Returns the raw u8 value of the `Quat`.
     #[inline]
     pub const fn value(self) -> u8 {
         self as u8

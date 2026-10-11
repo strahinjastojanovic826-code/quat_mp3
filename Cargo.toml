@@ -1,6 +1,6 @@
 [package]
 name = "quat_mp3"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Strale <strahinjastojanovic826@gmail.com>"]
 description = "MP3 metadata and frame inspector operating on base-4 quaternary logic"
@@ -12,3 +12,4 @@ categories = ["multimedia::audio", "encoding"]
 
 
 [dependencies]
+thiserror = "1.0"
