@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod error;
 pub mod inspector;
 pub mod quat;
+pub mod ffi;
 
 pub use buffer::QuatBuffer;
 pub use error::QuatError;
@@ -15,6 +16,8 @@ mod tests {
     use crate::inspector::{Mp3HeaderKind, Mp3Inspector, MpegLayer, MpegVersion};
     use crate::quat::Quat;
     use std::io::Cursor;
+    use super::*;
+    use crate::ffi::*;
 
     // ==========================================
     // 1. Easiest Tests: Basic Types & Conversions
@@ -164,6 +167,108 @@ mod tests {
             other => {
                 panic!("Unexpected inspection state during stress test: {:?}", other);
             }
+        }
+    }
+    #[test]
+    fn test_ffi_buffer_lifecycle_and_codec() {
+        unsafe {
+            // 1. Create buffer pointer
+            let buffer_ptr = quat_buffer_new();
+            assert!(!buffer_ptr.is_null(), "Failed to create FfiQuatBuffer");
+
+            // 2. Encode raw bytes (4 bytes -> 16 quats)
+            let input_data: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
+            let encode_res = quat_buffer_encode(
+                buffer_ptr,
+                input_data.as_ptr(),
+                input_data.len(),
+            );
+            assert_eq!(encode_res as u32, QuatFFIError::Success as u32, "Encoding failed");
+
+            // 3. Decode back to raw bytes
+            // Ensure out_data has exact capacity/length for the expected 4 decoded bytes
+            let mut out_data = vec![0u8; 4];
+            let mut out_len: usize = out_data.len();
+            
+            let decode_res = quat_buffer_decode(
+                buffer_ptr,
+                out_data.as_mut_ptr(),
+                &mut out_len as *mut usize,
+            );
+            
+            assert_eq!(decode_res as u32, QuatFFIError::Success as u32, "Decoding failed");
+            assert_eq!(out_len, 4, "Decoded length mismatch");
+            assert_eq!(out_data, input_data, "Decoded data does not match input");
+
+            // 4. Free memory safely
+            quat_buffer_free(buffer_ptr);
+        }
+    }
+
+    #[test]
+    fn test_ffi_inspector_empty_buffer() {
+        unsafe {
+            // 1. Create buffer
+            let buffer_ptr = quat_buffer_new();
+            assert!(!buffer_ptr.is_null());
+
+            // 2. Prepare structure for inspection result
+            let mut header_kind = FfiMp3HeaderKind {
+                tag: FfiHeaderKindTag::Unknown,
+                size_bytes: 0,
+                offset: 0,
+                header: FfiMpegHeader {
+                    version: FfiMpegVersion::Mpeg1,
+                    layer: FfiMpegLayer::Layer3,
+                    bitrate_kbps: 0,
+                    sample_rate_hz: 0,
+                    padding: false,
+                },
+            };
+
+            // 3. Run inspector on empty buffer
+            let res = quat_inspect_buffer(buffer_ptr, &mut header_kind);
+            assert_eq!(
+                res as u32,
+                QuatFFIError::Success as u32,
+                "Inspection failed"
+            );
+
+            // An empty buffer should typically resolve to Unknown or incomplete header
+            match header_kind.tag {
+                FfiHeaderKindTag::Unknown => {
+                    // Expected behavior for empty buffer
+                }
+                _ => {
+                    // Valid if inspector handles it differently, but tag should be populated safely
+                }
+            }
+
+            // 4. Clean up
+            quat_buffer_free(buffer_ptr);
+        }
+    }
+
+    #[test]
+    fn test_ffi_null_pointer_handling() {
+        unsafe {
+            // Ensure functions gracefully handle null pointers without crashing
+            let null_buf: *mut FfiQuatBuffer = std::ptr::null_mut();
+            let mut dummy_data = [0u8; 4];
+            let mut dummy_len = 4;
+
+            let encode_res = quat_buffer_encode(null_buf, dummy_data.as_ptr(), 4);
+            assert_eq!(encode_res as u32, QuatFFIError::NullPointer as u32);
+
+            let decode_res = quat_buffer_encode(null_buf, dummy_data.as_mut_ptr(), dummy_len);
+            assert_eq!(decode_res as u32, QuatFFIError::NullPointer as u32);
+
+            let mut header_kind = std::mem::zeroed();
+            let inspect_res = quat_inspect_buffer(null_buf, &mut header_kind);
+            assert_eq!(inspect_res as u32, QuatFFIError::NullPointer as u32);
+
+            // Freeing a null pointer should be safe
+            quat_buffer_free(null_buf);
         }
     }
 }

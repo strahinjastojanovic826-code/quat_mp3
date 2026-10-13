@@ -18,6 +18,17 @@ Instead of operating on standard octets directly, `quat_mp3` maps binary data in
 
 ---
 
+## Licensing
+
+This project is dual-licensed:
+
+* **Open Source (AGPLv3):** Free to use for open-source projects. If you use or modify this library in your software or network service, your source code must also be open-source under AGPLv3.
+* **Commercial License:** Required if you want to use `quat_mp3` in closed-source or proprietary commercial software without AGPLv3 restrictions.
+
+For commercial licensing, contact: **strahinjastojanovic826@gmail.com**
+
+---
+
 ## Quaternary Bit Mapping
 
 Each byte (8 bits) is sliced from Most Significant Bit (MSB) to Least Significant Bit (LSB) into 4 quaternary digits:
@@ -41,7 +52,7 @@ Add `quat_mp3` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_mp3 = "0.3.0"
+quat_mp3 = "0.4.0"
 ```
 
 ### Basic Encoding and Decoding
@@ -118,3 +129,159 @@ cargo test
 ```
 
 ---
+
+# quat_mp3 FFI Integration Guide
+
+This guide demonstrates how you can easily import and use the `quat_mp3` FFI library for working with quaternary buffers (`QuatBuffer`)[cite: 7, 8] and inspecting MP3 headers (`Mp3Inspector`)[cite: 3, 4] in **C**, **C++**, and **C#**.
+
+---
+
+## 1. C Integration (`main.c`)
+
+In C, you include the header (`quat_mp3.h`) and directly call functions with manual memory management.
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include "quat_mp3.h"
+
+int main() {
+    // 1. Create buffer (QuatBuffer)[cite: 7, 8]
+    FfiQuatBuffer* buffer = quat_buffer_new();
+    if (!buffer) {
+        printf("Failed to allocate buffer.\n");
+        return 1;
+    }
+
+    // 2. Encode raw bytes
+    uint8_t data[] = { 0x12, 0x34, 0x56, 0x78 };
+    QuatFFIError err = quat_buffer_encode(buffer, data, sizeof(data));
+    if (err != QUAT_SUCCESS) {
+        printf("Encoding failed with error code: %d\n", err);
+        quat_buffer_free(buffer);
+        return 1;
+    }
+
+    // 3. Inspect MP3 header (Mp3Inspector)[cite: 3, 4]
+    FfiMp3HeaderKind headerKind;
+    quat_inspect_buffer(buffer, &headerKind);
+
+    if (headerKind.tag == QUAT_TAG_MPEG_FRAME) {
+        printf("MPEG Frame found! Bitrate: %d kbps, Sample Rate: %d Hz\n",
+            headerKind.header.bitrate_kbps,
+            headerKind.header.sample_rate_hz
+        );
+    } else {
+        printf("No valid MPEG frame found or it is an ID3v2 tag.\n");
+    }
+
+    // 4. Free memory
+    quat_buffer_free(buffer);
+    return 0;
+}
+```
+
+---
+
+## 2. C++ Integration (`main.cpp`)
+
+In C++, you can use the RAII principle (e.g., smart pointers) to automatically release memory when the object goes out of scope.
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <memory>
+#include "quat_mp3.h"
+
+// RAII Deleter for FfiQuatBuffer
+struct QuatBufferDeleter {
+    void operator()(FfiQuatBuffer* ptr) const {
+        quat_buffer_free(ptr);
+    }
+};
+
+using SafeQuatBuffer = std::unique_ptr<FfiQuatBuffer, QuatBufferDeleter>;
+
+int main() {
+    // 1. Safe allocation using unique_ptr for QuatBuffer[cite: 7, 8]
+    SafeQuatBuffer buffer(quat_buffer_new());
+    if (!buffer) {
+        std::cerr << "Failed to create FfiQuatBuffer.\n";
+        return 1;
+    }
+
+    // 2. Encode bytes
+    std::vector<uint8_t> rawData = { 0x12, 0x34, 0x56, 0x78 };
+    QuatFFIError err = quat_buffer_encode(buffer.get(), rawData.data(), rawData.size());
+    
+    if (err != QUAT_SUCCESS) {
+        std::cerr << "Encoding failed.\n";
+        return 1;
+    }
+
+    // 3. Inspect buffer via Mp3Inspector[cite: 3, 4]
+    FfiMp3HeaderKind headerKind{};
+    quat_inspect_buffer(buffer.get(), &headerKind);
+
+    std::cout << "Inspection completed. Header tag type: " << static_cast<int>(headerKind.tag) << "\n";
+
+    // Memory is automatically freed here via quat_buffer_free when `buffer` goes out of scope
+    return 0;
+}
+```
+
+---
+
+## 3. C# Integration (`Program.cs`)
+
+In C#, use the defined `QuatNative` class with `DllImport` attributes to interact with the dynamic library (`.dll` on Windows or `.so` on Linux).
+
+```csharp
+using System;
+
+namespace QuatMp3App
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // 1. Create a new buffer pointer[cite: 7, 8]
+            IntPtr bufferPtr = QuatNative.quat_buffer_new();
+            if (bufferPtr == IntPtr.Zero)
+            {
+                Console.WriteLine("Failed to create native buffer.");
+                return;
+            }
+
+            try
+            {
+                // 2. Encode data
+                byte[] data = { 0x12, 0x34, 0x56, 0x78 };
+                QuatFFIError err = QuatNative.quat_buffer_encode(bufferPtr, data, (IntPtr)data.Length);
+
+                if (err != QuatFFIError.Success)
+                {
+                    Console.WriteLine($"Encoding failed with error: {err}");
+                    return;
+                }
+
+                // 3. Decode data back to verify[cite: 7, 8]
+                byte[] decodedData = new byte[4];
+                IntPtr outLen = (IntPtr)decodedData.Length;
+                err = QuatNative.quat_buffer_decode(bufferPtr, decodedData, ref outLen);
+
+                if (err == QuatFFIError.Success)
+                {
+                    Console.WriteLine($"Successfully decoded {outLen} bytes!");
+                    Console.WriteLine($"First byte: {decodedData[0]}");
+                }
+            }
+            finally
+            {
+                // 4. Always free native memory
+                QuatNative.quat_buffer_free(bufferPtr);
+            }
+        }
+    }
+}
+```
