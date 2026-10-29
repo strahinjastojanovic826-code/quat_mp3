@@ -15,6 +15,9 @@ Instead of operating on standard octets directly, `quat_mp3` maps binary data in
 - **Advanced ID3v2 Handling**: Automatically parses ID3v2 tag sizes and skips them to correctly locate underlying audio frames.
 - **Standard & Safe Conversions**: Full support for standard Rust traits including `TryFrom`, `From`, `Deref`, and `FromIterator`[cite: 10].
 - **Idiomatic Error Handling**: Comprehensive error management using a custom `QuatError` enum powered by `thiserror`[cite: 10].
+- **ID3v1 Tag Support**: Automatically detects and parses ID3v1 tags from the end of files (title, artist, album, and year).
+- **Idiomatic Iterators Support**: Full support for standard Rust iterators (`IntoIterator`, `FromIterator`, `iter()`) for clean and ergonomic quat traversal.
+- **Multi-language FFI Integration**: Fast and safe FFI layer allowing seamless integration into C, C++ (with RAII smart pointers), and C# (.NET) applications.
 
 ---
 
@@ -52,7 +55,7 @@ Add `quat_mp3` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_mp3 = "0.4.0"
+quat_mp3 = "0.5.0"
 ```
 
 ### Basic Encoding and Decoding
@@ -62,18 +65,18 @@ use quat_mp3::{QuatBuffer, Quat};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw_bytes = vec![0x49, 0x44, 0x33]; // ASCII "ID3"
-    
-    // Encode bytes to 4 quats per byte (12 quats total)
+
+    // Enkodiranje bajtova u kvartarni bafer
     let buffer = QuatBuffer::encode(&raw_bytes);
     assert_eq!(buffer.len(), 12);
 
-    // Inspect quaternary representation
-    for quat in buffer.as_quats() {
-        print!("{quat}"); // Prints quaternary digits (0-3)
+    // Korišćenje iteratora umesto stare as_quats() metode
+    for quat in &buffer {
+        print!("{quat}"); // Štampa kvartarne cifre (0-3)
     }
     println!();
 
-    // Decode back to raw bytes
+    // Dekodiranje nazad u sirove bajtove
     let decoded = buffer.decode()?;
     assert_eq!(decoded, raw_bytes);
 

@@ -5,6 +5,7 @@ use crate::quat::Quat;
 pub enum Mp3HeaderKind {
     Id3v2 { size_bytes: usize },
     MpegFrame { header: MpegHeader, offset: usize },
+    Id3v1 { title: String, artist: String, album: String, year: u16 },
     Unknown,
 }
 
@@ -34,7 +35,7 @@ pub struct MpegHeader {
 pub struct Mp3Inspector;
 
 impl Mp3Inspector {
-    const ID3_PATTERN: [Quat; 12] = [
+    pub const ID3_PATTERN: [Quat; 12] = [
         Quat::Q1, Quat::Q2, Quat::Q0, Quat::Q1, // 'I'
         Quat::Q1, Quat::Q2, Quat::Q0, Quat::Q0, // 'D'
         Quat::Q0, Quat::Q3, Quat::Q0, Quat::Q3, // '3'
@@ -42,34 +43,65 @@ impl Mp3Inspector {
 
     /// Inspects the buffer, handles ID3v2 tag skipping, and searches for a valid MPEG audio frame.
     pub fn detect_header(buffer: &QuatBuffer) -> Mp3HeaderKind {
-        let quats = buffer.as_quats();
-        if quats.len() < 12 {
-            return Mp3HeaderKind::Unknown;
-        }
+    // Pretvaramo zbijeni bafer u niz kvartova da bi ostatak inspektora radio bez izmena
+    let quats: Vec<Quat> = (0..buffer.len()).filter_map(|i| buffer.get(i)).collect();
 
-        // 1. Check for ID3v2 Tag Header at the start
-        if quats.starts_with(&Self::ID3_PATTERN) {
-            if quats.len() >= 40 {
-                let id3_size = Self::parse_id3_size(&quats[24..40]);
-                // Total ID3v2 tag size = 10-byte header + id3_size payload. In quats: * 4.
-                let total_id3_quats = (10 + id3_size) * 4;
+    if let Some(id3v1) = Self::detect_id3v1(&quats) {
+        return id3v1;
+    }
 
-                // Search for the MPEG frame after skipping the ID3v2 tag
-                if let Some((header, offset)) = Self::find_sync_frame(quats, total_id3_quats) {
-                    return Mp3HeaderKind::MpegFrame { header, offset };
-                }
+    // 1. Check for ID3v2 Tag Header at the start
+    if quats.starts_with(&Self::ID3_PATTERN) {
+        if quats.len() >= 40 {
+            let id3_size = Self::parse_id3_size(&quats[24..40]);
+            // Total ID3v2 tag size = 10-byte header + id3_size payload. In quats: * 4.
+            let total_id3_quats = (10 + id3_size) * 4;
 
-                return Mp3HeaderKind::Id3v2 { size_bytes: id3_size };
+            // Search for the MPEG frame after skipping the ID3v2 tag
+            if let Some((header, offset)) = Self::find_sync_frame(&quats, total_id3_quats) {
+                return Mp3HeaderKind::MpegFrame { header, offset };
             }
-            return Mp3HeaderKind::Id3v2 { size_bytes: 0 };
         }
+    }
 
-        // 2. Search for MPEG Frame Header from the beginning of the buffer
-        if let Some((header, offset)) = Self::find_sync_frame(quats, 0) {
-            return Mp3HeaderKind::MpegFrame { header, offset };
+    // 2. Search for MPEG Frame Header from the beginning of the buffer
+    if let Some((header, offset)) = Self::find_sync_frame(&quats, 0) {
+        return Mp3HeaderKind::MpegFrame { header, offset };
+    }
+
+    Mp3HeaderKind::Unknown
+}
+
+    pub fn detect_id3v1(quats: &[Quat]) -> Option<Mp3HeaderKind> {
+        if quats.len() >= 512 {
+            let start_idx = quats.len() - 512;
+            let mut decoded_bytes = Vec::with_capacity(128);
+            let mut valid = true;
+            for chunk_idx in 0..128 {
+                let base = start_idx + (chunk_idx * 4);
+                if let (Some(q0), Some(q1), Some(q2), Some(q3)) = (
+                    quats.get(base), quats.get(base + 1), quats.get(base + 2), quats.get(base + 3)
+                ) {
+                    let byte = (q0.value() << 6) | (q1.value() << 4) | (q2.value() << 2) | q3.value();
+                    decoded_bytes.push(byte);
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid && decoded_bytes.len() >= 128 && &decoded_bytes[0..3] == b"TAG" {
+                let parse_string = |bytes: &[u8]| -> String {
+                    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                    String::from_utf8_lossy(&bytes[0..len]).trim().to_string()
+                };
+                let title = parse_string(&decoded_bytes[3..33]);
+                let artist = parse_string(&decoded_bytes[33..63]);
+                let album = parse_string(&decoded_bytes[63..93]);
+                let year = parse_string(&decoded_bytes[93..97]).parse().unwrap_or(0);
+                return Some(Mp3HeaderKind::Id3v1 { title, artist, album, year });
+            }
         }
-
-        Mp3HeaderKind::Unknown
+        None
     }
 
     /// Scans through quats starting from `start_offset` to find a valid MPEG sync word.

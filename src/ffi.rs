@@ -136,6 +136,9 @@ pub extern "C" fn quat_inspect_buffer(
                 (*out_kind).tag = FfiHeaderKindTag::Id3v2;
                 (*out_kind).size_bytes = size_bytes;
             }
+            Mp3HeaderKind::Id3v1 { .. } => {
+            (*out_kind).tag = FfiHeaderKindTag::Unknown;
+        }
             Mp3HeaderKind::MpegFrame { header, offset } => {
                 (*out_kind).tag = FfiHeaderKindTag::MpegFrame;
                 (*out_kind).offset = offset;

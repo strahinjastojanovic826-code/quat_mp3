@@ -11,7 +11,6 @@ pub enum Quat {
 }
 
 impl Quat {
-    /// Constructs a `Quat` value using the lowest 2 bits.
     #[inline]
     pub const fn from_bits(bits: u8) -> Self {
         match bits & 0b11 {
@@ -22,7 +21,6 @@ impl Quat {
         }
     }
 
-    /// Returns the raw u8 value of the `Quat`.
     #[inline]
     pub const fn value(self) -> u8 {
         self as u8
@@ -46,8 +44,8 @@ impl TryFrom<u8> for Quat {
 
 impl From<Quat> for u8 {
     #[inline]
-    fn from(q: Quat) -> Self {
-        q.value()
+    fn from(quat: Quat) -> Self {
+        quat.value()
     }
 }
 

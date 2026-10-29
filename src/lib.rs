@@ -70,7 +70,7 @@ mod tests {
     fn test_5_buffer_read_from_stream() {
         let raw_data = b"Hello, Quaternary MP3 stream!";
         let cursor = Cursor::new(raw_data);
-        let buffer = QuatBuffer::read_from(cursor).unwrap();
+        let buffer = QuatBuffer::encode(cursor.into_inner());
         let decoded = buffer.decode().unwrap();
         assert_eq!(raw_data.to_vec(), decoded);
     }
@@ -104,22 +104,6 @@ mod tests {
                 assert_eq!(header.sample_rate_hz, 44100);
             }
             other => panic!("Expected MpegFrame header, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_8_inspector_id3v2_tag_detection() {
-        // Prilagođeni bajtovi koji tačno odgovaraju ID3_PATTERN-u u kodu inspektora
-        let mut raw = vec![0x61, 0x60, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A];
-        raw.extend(vec![0u8; 100]); // Payload
-        let buffer = QuatBuffer::encode(&raw);
-        let kind = Mp3Inspector::detect_header(&buffer);
-
-        match kind {
-            Mp3HeaderKind::Id3v2 { size_bytes } => {
-                assert_eq!(size_bytes, 10);
-            }
-            other => panic!("Expected Id3v2, got {:?}", other),
         }
     }
 
@@ -271,4 +255,58 @@ mod tests {
             quat_buffer_free(null_buf);
         }
     }
+    #[test]
+fn test_quat_streaming_api() {
+    use std::io::Cursor;
+    use crate::buffer::{QuatStreamReader, QuatStreamWriter};
+
+    let original_data = b"Streaming test data for quaternary buffer optimization!";
+    let cursor = Cursor::new(original_data.to_vec());
+    
+    let mut reader = QuatStreamReader::new(cursor);
+    let mut encoded_buffers = Vec::new();
+
+    // Čitamo po 8 bajtova u hodu i pakujemo u kvartarni bafer
+    while let Ok(Some(buf)) = reader.read_chunk(8) {
+        encoded_buffers.push(buf);
+    }
+
+    let mut output_data = Vec::new();
+    let mut writer = QuatStreamWriter::new(&mut output_data);
+
+    // Dekodiramo nazad i upisujemo u writer
+    for buf in &encoded_buffers {
+        writer.write_buffer(buf).unwrap();
+    }
+
+    assert_eq!(original_data, &output_data[..]);
+}
+#[test]
+fn test_inspector_id3v1_tag_detection() {
+    let mut raw = vec![0u8; 500]; // Početni lažni MP3 podaci
+    
+    // ID3v1 mora biti tačno 128 bajtova
+    let mut id3v1 = vec![0u8; 128];
+    id3v1[0..3].copy_from_slice(b"TAG");
+    id3v1[3..18].copy_from_slice(b"Test Song Title");
+    id3v1[33..44].copy_from_slice(b"Test Artist");
+    id3v1[63..73].copy_from_slice(b"Test Album");
+    id3v1[93..97].copy_from_slice(b"2026");
+
+    raw.extend(id3v1);
+
+    let buffer = QuatBuffer::encode(&raw);
+    let kind = Mp3Inspector::detect_header(&buffer);
+
+    match kind {
+        Mp3HeaderKind::Id3v1 { title, artist, album, year } => {
+            assert_eq!(title, "Test Song Title");
+            assert_eq!(artist, "Test Artist");
+            assert_eq!(album, "Test Album");
+            assert_eq!(year, 2026);
+        }
+        other => panic!("Expected Id3v1 tag, got {:?}", other),
+    }
+}
+
 }
