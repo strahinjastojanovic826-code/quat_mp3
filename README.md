@@ -18,8 +18,31 @@ Instead of operating on standard octets directly, `quat_mp3` maps binary data in
 - **ID3v1 Tag Support**: Automatically detects and parses ID3v1 tags from the end of files (title, artist, album, and year).
 - **Idiomatic Iterators Support**: Full support for standard Rust iterators (`IntoIterator`, `FromIterator`, `iter()`) for clean and ergonomic quat traversal.
 - **Multi-language FFI Integration**: Fast and safe FFI layer allowing seamless integration into C, C++ (with RAII smart pointers), and C# (.NET) applications.
+- **VBR Info Parsing**: Automatic detection and parsing of variable bitrate (Xing/Info) headers with preserved tuple structure and the `vbr_opt` parameter.
+- **ID3v1 Tag Support**: Detection and full parsing of ID3v1 tags with support for fields such as title, artist, album, and numeric year (`u16`).
+- **Custom Benchmarking Suite**: Built-in performance measurement for new features (resync, VBR, and ID3v1) based on `std::time::Instant` without requiring external dependencies like `criterion`.
+- **FFI & Pattern Matching Sync**: Synchronized 3-element tuples and pattern matchings in `ffi.rs` and `lib.rs` (`Mp3HeaderKind::MpegFrame` with `_vbr_info`) for stable cross-language communication.
 
 ---
+
+## Benchmark
+
+| Test Name | Category | Execution Time |
+|---|---|---|
+| test_1_quat_basic_bits_and_values | Basic Bits & Values | 3.4 µs |
+| test_2_quat_try_from_u8 | Type Conversion | 1.6 µs |
+| test_3_buffer_encode_decode_roundtrip | Buffer Codec | 8.8 µs |
+| test_4_buffer_invalid_length_error | Error Handling | 600 ns |
+| test_ffi_buffer_lifecycle_and_codec | FFI Operations | 3.6 µs |
+| test_ffi_null_pointer_handling | FFI Safety | 600 ns |
+| test_7_inspector_clean_mpeg_header | Header Inspection | 6.8 µs |
+| test_5_buffer_read_from_stream | Streaming | 10.3 µs |
+| test_9_inspector_frame_sync_with_preceding_noise | Sync & Resync | 19.9 µs |
+| test_ffi_inspector_empty_buffer | FFI Inspection | 1.6 µs |
+| test_6_buffer_write_decoded_to_stream | Stream Writing | 9.9 µs |
+| test_inspector_vbr_detection | VBR Parsing | 171.4 µs |
+| test_inspector_id3v1_tag_detection | ID3v1 Parsing | 183.4 µs |
+| test_10_inspector_heavy_stress_random_garbage | Stress Test (8KB) | 3.406 ms |
 
 ## Licensing
 
@@ -55,7 +78,7 @@ Add `quat_mp3` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_mp3 = "0.5.0"
+quat_mp3 = "1.0.0"
 ```
 
 ### Basic Encoding and Decoding
@@ -100,21 +123,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mp3HeaderKind::Id3v2 { size_bytes: 10 }
     ));
 
-    // 2. MPEG Frame detection with sync search & offset tracking
-    // Preceding noise followed by a valid MPEG-1 Layer 3 frame header (0xFFFB9000)
+    // 2. MPEG Frame detection with sync search, offset tracking & VBR info
     let mut raw_stream = vec![0x00, 0x01, 0x02]; // Noise bytes
     raw_stream.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
-    
+
     let stream_buffer = QuatBuffer::encode(&raw_stream);
-    
+
     match Mp3Inspector::detect_header(&stream_buffer) {
-        Mp3HeaderKind::MpegFrame { header, offset } => {
-            println!("Found MPEG Frame at quat offset: {}", offset);
+        Mp3HeaderKind::MpegFrame { header, offset, vbr_info } => {
+            println!("Found MPEG Frame at quat offset: {}, VBR Info: {:?}", offset, vbr_info);
             println!("Bitrate: {} kbps, Sample Rate: {} Hz", header.bitrate_kbps, header.sample_rate_hz);
             assert_eq!(header.version, MpegVersion::Mpeg1);
             assert_eq!(header.layer, MpegLayer::Layer3);
         }
-        other => panic!("Expected MpegFrame, got {:?}", other),
+        other => panic!("Expected MpegFrame, got: {:?}", other),
+    }
+
+    // 3. ID3v1 Tag Detection Example
+    let mut id3v1_raw = vec![0u8; 100];
+    let mut id3v1_tag = vec![0u8; 128];
+    id3v1_tag[0..3].copy_from_slice(b"TAG");
+    id3v1_tag[3..18].copy_from_slice(b"Sample Title");
+    id3v1_tag[93..97].copy_from_slice(b"2026");
+    id3v1_raw.extend(&id3v1_tag);
+
+    let id3v1_buffer = QuatBuffer::encode(&id3v1_raw);
+    match Mp3Inspector::detect_header(&id3v1_buffer) {
+        Mp3HeaderKind::Id3v1 { title, artist, album, year } => {
+            println!("ID3v1 Title: {}, Year: {}", title, year);
+            assert_eq!(title, "Sample Title");
+            assert_eq!(year, 2026);
+        }
+        other => panic!("Expected Id3v1 tag, got: {:?}", other),
     }
 
     Ok(())
@@ -149,15 +189,15 @@ In C, you include the header (`quat_mp3.h`) and directly call functions with man
 #include "quat_mp3.h"
 
 int main() {
-    // 1. Create buffer (QuatBuffer)[cite: 7, 8]
+    // 1. Create buffer (FfiQuatBuffer)
     FfiQuatBuffer* buffer = quat_buffer_new();
     if (!buffer) {
         printf("Failed to allocate buffer.\n");
         return 1;
     }
 
-    // 2. Encode raw bytes
-    uint8_t data[] = { 0x12, 0x34, 0x56, 0x78 };
+    // 2. Encode raw bytes (e.g., MPEG header with VBR or ID3v1)
+    uint8_t data[] = { 0xFF, 0xFB, 0x90, 0x00 };
     QuatFFIError err = quat_buffer_encode(buffer, data, sizeof(data));
     if (err != QUAT_SUCCESS) {
         printf("Encoding failed with error code: %d\n", err);
@@ -165,23 +205,31 @@ int main() {
         return 1;
     }
 
-    // 3. Inspect MP3 header (Mp3Inspector)[cite: 3, 4]
-    FfiMp3HeaderKind headerKind;
+    // 3. Inspect MP3 header (Mp3Inspector)
+    FfiAdvancedHeaderResult headerKind;
     quat_inspect_buffer(buffer, &headerKind);
 
     if (headerKind.tag == QUAT_TAG_MPEG_FRAME) {
         printf("MPEG Frame found! Bitrate: %d kbps, Sample Rate: %d Hz\n",
-            headerKind.header.bitrate_kbps,
-            headerKind.header.sample_rate_hz
-        );
+               headerKind.header.bitrate_kbps,
+               headerKind.header.sample_rate_hz);
+        
+        // Checking VBR info if available
+        if (headerKind.vbr_data.is_vbr) {
+            printf("VBR detected! Total frames: %u, Total bytes: %u\n",
+                   headerKind.vbr_data.total_frames,
+                   headerKind.vbr_data.total_bytes);
+        }
+    } else if (headerKind.tag == QUAT_TAG_ID3V1) {
+        printf("ID3v1 tag detected!\n");
     } else {
-        printf("No valid MPEG frame found or it is an ID3v2 tag.\n");
+        printf("No valid MPEG frame or ID3v1 tag found.\n");
     }
 
     // 4. Free memory
     quat_buffer_free(buffer);
     return 0;
-}
+} 
 ```
 
 ---

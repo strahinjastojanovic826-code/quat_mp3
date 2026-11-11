@@ -13,4 +13,13 @@ pub enum QuatError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Invalid Xing/VBRI VBR header")]
+    InvalidVbrHeader,
+
+    #[error("Corrupted or unsupported ID3v2 tag")]
+    InvalidId3v2,
+
+    #[error("MPEG CRC verification failed")]
+    CrcCheckFailed,
 }
