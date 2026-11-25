@@ -1,4 +1,3 @@
-use crate::error::QuatError;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,21 +26,6 @@ impl Quat {
     }
 }
 
-impl TryFrom<u8> for Quat {
-    type Error = QuatError;
-
-    #[inline]
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Q0),
-            1 => Ok(Self::Q1),
-            2 => Ok(Self::Q2),
-            3 => Ok(Self::Q3),
-            val => Err(QuatError::InvalidDigitValue(val)),
-        }
-    }
-}
-
 impl From<Quat> for u8 {
     #[inline]
     fn from(quat: Quat) -> Self {
@@ -52,5 +36,28 @@ impl From<Quat> for u8 {
 impl fmt::Display for Quat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.value())
+    }
+}
+
+impl From<u8> for Quat {
+    #[inline]
+    fn from(bits: u8) -> Self {
+        Self::from_bits(bits)
+    }
+}
+
+impl AsRef<Quat> for Quat {
+    #[inline]
+    fn as_ref(&self) -> &Quat {
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuatVec(pub Vec<Quat>);
+
+impl FromIterator<u8> for QuatVec {
+    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+        Self(iter.into_iter().map(Quat::from_bits).collect())
     }
 }

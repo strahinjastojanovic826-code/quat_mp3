@@ -19,30 +19,37 @@ Instead of operating on standard octets directly, `quat_mp3` maps binary data in
 - **Idiomatic Iterators Support**: Full support for standard Rust iterators (`IntoIterator`, `FromIterator`, `iter()`) for clean and ergonomic quat traversal.
 - **Multi-language FFI Integration**: Fast and safe FFI layer allowing seamless integration into C, C++ (with RAII smart pointers), and C# (.NET) applications.
 - **VBR Info Parsing**: Automatic detection and parsing of variable bitrate (Xing/Info) headers with preserved tuple structure and the `vbr_opt` parameter.
-- **ID3v1 Tag Support**: Detection and full parsing of ID3v1 tags with support for fields such as title, artist, album, and numeric year (`u16`).
 - **Custom Benchmarking Suite**: Built-in performance measurement for new features (resync, VBR, and ID3v1) based on `std::time::Instant` without requiring external dependencies like `criterion`.
 - **FFI & Pattern Matching Sync**: Synchronized 3-element tuples and pattern matchings in `ffi.rs` and `lib.rs` (`Mp3HeaderKind::MpegFrame` with `_vbr_info`) for stable cross-language communication.
+- **Incremental Streaming Parser & Metrics**: Feeds encoded data incrementally and tracks parsing telemetry (`ParserMetrics`, sync attempts, and inspected quats).
+- **Bounds-Safe Parsing**: Adds length and bounds checks when reading buffer elements and VBR/tag headers to avoid out-of-bounds panics on short or partial inputs.
+- **Expanded Test & Timing Coverage**: Tests `QuatVec`, stream chunking, recoverable stream errors, incremental parsing, and VBR parsing with built-in `std::time::Instant` execution timing.
 
 ---
 
 ## Benchmark
 
-| Test Name | Category | Execution Time |
-|---|---|---|
-| test_1_quat_basic_bits_and_values | Basic Bits & Values | 3.4 µs |
-| test_2_quat_try_from_u8 | Type Conversion | 1.6 µs |
-| test_3_buffer_encode_decode_roundtrip | Buffer Codec | 8.8 µs |
-| test_4_buffer_invalid_length_error | Error Handling | 600 ns |
-| test_ffi_buffer_lifecycle_and_codec | FFI Operations | 3.6 µs |
-| test_ffi_null_pointer_handling | FFI Safety | 600 ns |
-| test_7_inspector_clean_mpeg_header | Header Inspection | 6.8 µs |
-| test_5_buffer_read_from_stream | Streaming | 10.3 µs |
-| test_9_inspector_frame_sync_with_preceding_noise | Sync & Resync | 19.9 µs |
-| test_ffi_inspector_empty_buffer | FFI Inspection | 1.6 µs |
-| test_6_buffer_write_decoded_to_stream | Stream Writing | 9.9 µs |
-| test_inspector_vbr_detection | VBR Parsing | 171.4 µs |
-| test_inspector_id3v1_tag_detection | ID3v1 Parsing | 183.4 µs |
-| test_10_inspector_heavy_stress_random_garbage | Stress Test (8KB) | 3.406 ms |
+| Test Name | Module / Area | Status | Execution Time | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `test_1_quat_basic_bits_and_values` | `quat` | OK | `100ns` | Basic quaternary bit values and representation |
+| `test_2_quat_try_from_u8` | `quat` | OK | `300ns` | Fallible conversion from `u8` to quaternary values |
+| `test_3_buffer_encode_decode_roundtrip` | `buffer` | OK | `3µs` | Full encode and decode roundtrip on `QuatBuffer` |
+| `test_4_buffer_invalid_length_error` | `buffer` | OK | `400ns` | Error handling on invalid buffer lengths |
+| `test_5_buffer_read_from_stream` | `buffer` | OK | `7.9µs` | Reading raw data from an input stream into buffer |
+| `test_6_buffer_write_decoded_to_stream` | `buffer` | OK | `9µs` | Writing decoded output to a stream |
+| `test_7_inspector_clean_mpeg_header` | `inspector` | OK | `17.2µs` | Detection of a clean MPEG frame header |
+| `test_9_inspector_frame_sync_with_preceding_noise` | `inspector` | OK | `18µs` | Frame resynchronization after leading noise bytes |
+| `test_10_inspector_heavy_stress_random_garbage` | `inspector` | OK | `3.5994ms` | Heavy stress test against random garbage input |
+| `test_11_quat_vec_from_iterator_and_error_helpers` | `quat` / `error` | OK | `29.8µs` | `FromIterator` collection for `QuatVec` and recoverable error helpers |
+| `test_12_stream_reader_read_encoded_into_incremental` | `buffer` | OK | `26.5µs` | Incremental chunked reading via `QuatStreamReader::read_encoded_into` |
+| `test_13_incremental_parser_id3v2_and_metrics` | `inspector` | OK | `67µs` | Incremental feeding with ID3v2 data and parser metrics tracking |
+| `test_14_parse_real_xing_vbr_header` | `inspector` | OK | `42.1µs` | Xing VBR header parsing over quaternary input |
+| `test_inspector_vbr_detection` | `inspector` | OK | `177.1µs` | VBR header detection (`VBR Info detected successfully: None` on sample) |
+| `test_inspector_id3v1_tag_detection` | `inspector` | OK | `242.2µs` | ID3v1 tag detection and field parsing |
+| `test_quat_streaming_api` | `buffer` / `quat` | OK | `21.8µs` | Streaming API workflow verification |
+| `test_ffi_buffer_lifecycle_and_codec` | `ffi` | OK | `4µs` | FFI buffer allocation, codec operations, and cleanup |
+| `test_ffi_inspector_empty_buffer` | `ffi` | OK | `2µs` | FFI inspection behavior on an empty buffer |
+| `test_ffi_null_pointer_handling` | `ffi` | OK | `500ns` | Safe handling of null pointers across FFI boundary |
 
 ## Licensing
 
@@ -78,7 +85,7 @@ Add `quat_mp3` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_mp3 = "1.0.0"
+quat_mp3 = "1.1.0"
 ```
 
 ### Basic Encoding and Decoding
@@ -102,6 +109,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Dekodiranje nazad u sirove bajtove
     let decoded = buffer.decode()?;
     assert_eq!(decoded, raw_bytes);
+
+    Ok(())
+}
+```
+
+### Incremental Parsing, Stream Chunking & `QuatVec`
+
+```rust
+use quat_mp3::buffer::{QuatBuffer, QuatStreamReader};
+use quat_mp3::inspector::IncrementalMp3Parser;
+use quat_mp3::quat::QuatVec;
+use std::io::Cursor;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build QuatVec via FromIterator<u8>
+    let quat_vec: QuatVec = [0u8, 1u8, 2u8, 3u8].into_iter().collect();
+    assert_eq!(quat_vec.0.len(), 4);
+
+    // Stream input into QuatBuffer in chunks
+    let stream_data = b"QuatMP3 streaming chunk example";
+    let mut reader = QuatStreamReader::new(Cursor::new(stream_data.to_vec()));
+    let mut buf = QuatBuffer::new();
+    while reader.read_encoded_into(&mut buf, 8)? > 0 {}
+
+    // Feed buffer into incremental parser and inspect metrics
+    let mut parser = IncrementalMp3Parser::new();
+    parser.feed(&buf);
+    println!(
+        "Inspected quats: {}, sync attempts: {}",
+        parser.metrics.total_quats_inspected,
+        parser.metrics.sync_attempts
+    );
 
     Ok(())
 }

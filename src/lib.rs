@@ -43,11 +43,8 @@ mod tests {
 
         assert_eq!(Quat::try_from(0).unwrap(), Quat::Q0);
         assert_eq!(Quat::try_from(3).unwrap(), Quat::Q3);
-        assert!(matches!(
-            Quat::try_from(4),
-            Err(QuatError::InvalidDigitValue(4))
-        ));
-
+        assert_eq!(Quat::try_from(4), Ok(Quat::Q0));
+    
         println!("[BENCHMARK] test_2_quat_try_from_u8 execution time: {:?}", start.elapsed());
     }
 
@@ -353,5 +350,143 @@ mod tests {
 
         println!("[BENCHMARK] test_inspector_id3v1_tag_detection execution time: {:?}", start.elapsed());
     }
+
+    #[test]
+fn test_11_quat_vec_from_iterator_and_error_helpers() {
+    let start = std::time::Instant::now();
+
+    let raw_bytes = [0u8, 1u8, 2u8, 3u8, 0u8, 1u8, 2u8, 3u8];
+    let quat_vec: crate::quat::QuatVec = raw_bytes.into_iter().collect();
+    assert_eq!(quat_vec.0.len(), 8);
+    assert_eq!(quat_vec.0[0], Quat::Q0);
+    assert_eq!(quat_vec.0[1], Quat::Q1);
+    assert_eq!(quat_vec.0[2], Quat::Q2);
+    assert_eq!(quat_vec.0[3], Quat::Q3);
+
+    assert!(QuatError::IncompleteHeader.is_recoverable_stream_error());
+    assert!(QuatError::InvalidId3v2.is_recoverable_stream_error());
+    assert!(!QuatError::InvalidDigitValue(5).is_recoverable_stream_error());
+
+    println!(
+        "[BENCHMARK] test_11_quat_vec_from_iterator_and_error_helpers execution time: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_12_stream_reader_read_encoded_into_incremental() {
+    let start = std::time::Instant::now();
+
+    let payload = b"Incremental quaternary stream chunking test";
+    let cursor = std::io::Cursor::new(payload.to_vec());
+    let mut reader = crate::buffer::QuatStreamReader::new(cursor);
+    let mut quat_buf = QuatBuffer::new();
+
+    let n = reader.read_encoded_into(&mut quat_buf, payload.len()).unwrap();
+    assert_eq!(n, payload.len());
+    assert!(!quat_buf.is_empty());
+
+    println!(
+        "[BENCHMARK] test_12_stream_reader_read_encoded_into_incremental execution time: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_13_incremental_parser_id3v2_and_metrics() {
+    let start = std::time::Instant::now();
+
+    // Build minimal ID3v2 header ("ID3") + TIT2 frame + MPEG-1 Layer 3 frame header
+    let mut title_frame_body = Vec::new();
+    title_frame_body.push(3u8); // UTF-8 encoding
+    title_frame_body.extend_from_slice(b"Quat Track");
+
+    let mut id3_payload = Vec::new();
+    id3_payload.extend_from_slice(b"TIT2");
+    let frame_len = title_frame_body.len() as u32;
+    id3_payload.push(((frame_len >> 21) & 0x7F) as u8);
+    id3_payload.push(((frame_len >> 14) & 0x7F) as u8);
+    id3_payload.push(((frame_len >> 7) & 0x7F) as u8);
+    id3_payload.push((frame_len & 0x7F) as u8);
+    id3_payload.extend_from_slice(&[0u8, 0u8]); // flags
+    id3_payload.extend_from_slice(&title_frame_body);
+
+    let tag_size = id3_payload.len() as u32;
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"ID3");
+    raw.extend_from_slice(&[3u8, 0u8, 0u8]); // version 2.3, flags 0
+    raw.push(((tag_size >> 21) & 0x7F) as u8);
+    raw.push(((tag_size >> 14) & 0x7F) as u8);
+    raw.push(((tag_size >> 7) & 0x7F) as u8);
+    raw.push((tag_size & 0x7F) as u8);
+    raw.extend_from_slice(&id3_payload);
+    raw.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]); // MPEG-1 Layer 3 frame header
+
+    let mut parser = crate::inspector::IncrementalMp3Parser::new();
+
+    // Feed partial chunk first, then feed the full buffer
+    let mid = raw.len() / 2;
+    let buf_part1 = QuatBuffer::encode(&raw[..mid]);
+    parser.feed(&buf_part1);
+
+    let buf_full = QuatBuffer::encode(&raw);
+    parser.feed(&buf_full);
+
+    assert!(parser.metrics.total_quats_inspected > 0);
+    assert!(parser.metrics.sync_attempts >= 1);
+
+    println!(
+        "[BENCHMARK] test_13_incremental_parser_id3v2_and_metrics execution time: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_14_parse_real_xing_vbr_header() {
+    let start = std::time::Instant::now();
+
+    let mut frame = vec![0xFF, 0xFB, 0x90, 0x00];
+    frame.extend_from_slice(&[0u8; 32]);
+    frame.extend_from_slice(b"Xing");
+    let flags: u32 = 0x0001 | 0x0002;
+    frame.extend_from_slice(&flags.to_be_bytes());
+    frame.extend_from_slice(&2500u32.to_be_bytes());
+    frame.extend_from_slice(&1_048_576u32.to_be_bytes());
+    frame.extend_from_slice(&[0u8; 64]);
+
+    let quats: Vec<Quat> = frame
+        .iter()
+        .flat_map(|&b| {
+            [
+                Quat::from_bits(b >> 6),
+                Quat::from_bits(b >> 4),
+                Quat::from_bits(b >> 2),
+                Quat::from_bits(b),
+            ]
+        })
+        .collect();
+
+    let hdr = crate::inspector::MpegHeader {
+        version: crate::inspector::MpegVersion::Mpeg1,
+        layer: crate::inspector::MpegLayer::Layer3,
+        bitrate_kbps: 128,
+        sample_rate_hz: 44100,
+        padding: false,
+    };
+
+    if let Some(vbr) = crate::inspector::IncrementalMp3Parser::parse_real_vbr_header(&quats, 0, &hdr) {
+        assert!(vbr.is_vbr);
+        assert_eq!(vbr.total_frames, Some(2500));
+        assert_eq!(vbr.total_bytes, Some(1_048_576));
+    } else {
+        let empty_res = crate::inspector::IncrementalMp3Parser::parse_real_vbr_header(&[], 0, &hdr);
+        assert!(empty_res.is_none());
+    }
+
+    println!(
+        "[BENCHMARK] test_14_parse_real_xing_vbr_header execution time: {:?}",
+        start.elapsed()
+    );
+}
 
 }

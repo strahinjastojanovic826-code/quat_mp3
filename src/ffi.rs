@@ -1,3 +1,25 @@
+//! # FFI Safety & `unsafe` Contract
+//!
+//! This module exposes a C-compatible FFI interface (`extern "C"`) over `QuatBuffer` and
+//! `Mp3Inspector`. All `unsafe` blocks and functions rely on the following invariants that the
+//! caller (e.g., C, C++, or C#) must uphold:
+//!
+//! - **Pointer Validity (`*const` / `*mut`):** Pointers passed for `FfiQuatBuffer`, `out_len`,
+//!   `out_kind`, and `out_result` must be non-null (where required), properly aligned, and point
+//!   to initialized memory valid for at least the duration of the call. For an input `data` buffer
+//!   of length `len`, the pointer must be valid for reading `len` bytes (unless `len == 0` / null
+//!   is explicitly checked and handled).
+//! - **Ownership & Memory Reclamation (`Box`):** `quat_buffer_new` heap-allocates an
+//!   `FfiQuatBuffer` via `Box::into_raw` and transfers ownership to the caller. `quat_buffer_free`
+//!   must be called at most once per pointer and only on pointers created by `quat_buffer_new`,
+//!   after which the pointer must never be used again (*no use-after-free*, *no double-free*).
+//! - **Source Pointers & Copying (`from_raw_parts`, `copy_nonoverlapping`):** `data` and
+//!   `out_data` must not alias in an invalid manner when passed to `slice::from_raw_parts` and
+//!   `ptr::copy_nonoverlapping`, and `out_data` must have capacity for at least `*out_len` bytes
+//!   when calling `quat_buffer_decode`.
+//! - **Exclusive / Single-Threaded Access:** The caller must ensure there are no concurrent mutable
+//!   and immutable references to the same `FfiQuatBuffer` across overlapping FFI calls.
+
 use std::os::raw::{c_uchar, c_uint, c_ushort};
 use crate::buffer::QuatBuffer;
 use crate::inspector::{Mp3Inspector, Mp3HeaderKind, MpegVersion, MpegLayer};
@@ -58,6 +80,16 @@ pub struct FfiMpegHeader {
     pub bitrate_kbps: c_ushort,
     pub sample_rate_hz: c_uint,
     pub padding: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiParserMetrics {
+    pub total_quats_inspected: usize,
+    pub sync_attempts: usize,
+    pub resync_skips: usize,
+    pub id3v2_detected: u8,
+    pub vbr_detected: u8,
 }
 
 #[repr(C)]

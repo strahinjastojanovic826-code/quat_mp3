@@ -22,4 +22,19 @@ pub enum QuatError {
 
     #[error("MPEG CRC verification failed")]
     CrcCheckFailed,
+
+    #[error("Invalid UTF-8 or text encoding in metadata: {0}")]
+    InvalidMetadataEncoding(String),
+}
+
+impl QuatError {
+    pub fn is_recoverable_stream_error(&self) -> bool {
+        matches!(
+            self,
+            Self::IncompleteHeader
+                | Self::InvalidVbrHeader
+                | Self::InvalidId3v2
+                | Self::CrcCheckFailed
+        )
+    }
 }

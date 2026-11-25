@@ -1,6 +1,7 @@
 use crate::error::QuatError;
 use crate::quat::Quat;
 use std::io::{Read, Write};
+use std::ops::Index;
 
 #[derive(Debug, Clone, Default)]
 pub struct QuatBuffer {
@@ -42,19 +43,19 @@ impl QuatBuffer {
 
     /// Čita kvart sa zadatog indeksa bez dodatne alokacije memorije
     pub fn get(&self, index: usize) -> Option<Quat> {
-        if index >= self.len {
-            return None;
-        }
-
-        let byte_idx = index / 4;
-        let position = index % 4;
-        let shift = (3 - position) * 2;
-
-        let byte = self.data[byte_idx];
-        let val = (byte >> shift) & 0b11;
-
-        Some(Quat::from_bits(val))
+    if index >= self.len {
+        return None;
     }
+
+    let byte_idx = index / 4;
+    let position = index % 4;
+    let shift = (3 - position) * 2;
+
+    let byte = *self.data.get(byte_idx)?;
+    let val = (byte >> shift) & 0b11;
+
+    Some(Quat::from_bits(val))
+}
 
     pub fn len(&self) -> usize {
         self.len
@@ -160,6 +161,39 @@ impl<R: Read> QuatStreamReader<R> {
         raw_buf.truncate(bytes_read);
         Ok(Some(QuatBuffer::encode(&raw_buf)))
     }
+
+    /// Incrementally reads up to `max_raw_bytes` from the underlying reader,
+    /// encodes them into quaternary form, and appends them to `out_buffer`.
+    /// Returns the number of raw input bytes read (0 on EOF).
+    pub fn read_encoded_into(
+        &mut self,
+        out_buffer: &mut QuatBuffer,
+        max_raw_bytes: usize,
+    ) -> std::io::Result<usize> {
+        if max_raw_bytes == 0 {
+            return Ok(0);
+        }
+        let mut raw_buf = vec![0u8; max_raw_bytes];
+        let mut total_read = 0;
+
+        while total_read < max_raw_bytes {
+            match self.inner.read(&mut raw_buf[total_read..])? {
+                0 => break,
+                n => total_read += n,
+            }
+        }
+
+        if total_read == 0 {
+            return Ok(0);
+        }
+
+        let encoded = QuatBuffer::encode_bulk(&raw_buf[..total_read]);
+        out_buffer.extend(
+            (0..encoded.len()).filter_map(|i| encoded.get(i)),
+        );
+        Ok(total_read)
+    }
+    
 }
 
 pub struct QuatStreamWriter<W: Write> {
@@ -176,5 +210,31 @@ impl<W: Write> QuatStreamWriter<W> {
         let decoded_bytes = buffer.decode()?;
         self.inner.write_all(&decoded_bytes)?;
         Ok(())
+    }
+}
+
+impl AsRef<[u8]> for QuatBuffer {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Index<usize> for QuatBuffer {
+    type Output = Quat;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        // Static cache or direct lookup via get; for ergonomic slice-like indexing
+        // we return a reference to a thread-local or panic on out-of-bounds.
+        let _ = self.get(index).expect("QuatBuffer index out of bounds");
+        unimplemented!("Use QuatBuffer::get(index) for zero-copy value access")
+    }
+}
+
+impl Extend<Quat> for QuatBuffer {
+    fn extend<T: IntoIterator<Item = Quat>>(&mut self, iter: T) {
+        for q in iter {
+            self.push(q);
+        }
     }
 }

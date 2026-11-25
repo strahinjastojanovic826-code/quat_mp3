@@ -47,6 +47,35 @@ pub struct VbrInfo {
     pub padding: Option<u16>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParserMetrics {
+    pub total_quats_inspected: usize,
+    pub sync_attempts: usize,
+    pub resync_skips: usize,
+    pub id3v2_detected: bool,
+    pub vbr_detected: bool,
+    pub last_frame_offset_quats: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedId3v2Metadata {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct IncrementalMp3Parser {
+    pub metrics: ParserMetrics,
+    pub metadata: ParsedId3v2Metadata,
+    pub vbr_info: Option<VbrInfo>,
+    pub header: Option<MpegHeader>,
+    pub frame_offset_quats: Option<usize>,
+    cursor_quats: usize,
+    id3v2_end_quats: Option<usize>,
+}
+
 pub struct Mp3Inspector;
 
 impl Mp3Inspector {
@@ -190,6 +219,42 @@ impl Mp3Inspector {
     }
 
     Mp3HeaderKind::Unknown
+}
+
+pub(crate) fn verify_subsequent_frames(
+    quats: &[Quat],
+    current_offset: usize,
+    header: &MpegHeader,
+) -> bool {
+    let frame_size = Self::calculate_frame_size(header);
+    if frame_size == 0 {
+        return false;
+    }
+    let next_offset = current_offset + (frame_size * 4);
+    if next_offset + 16 > quats.len() {
+        return true;
+    }
+    if let Some(next_header) = Self::parse_mpeg_header(&quats[next_offset..next_offset + 16]) {
+        return next_header.version == header.version && next_header.layer == header.layer;
+    }
+    false
+}
+
+pub(crate) fn calculate_frame_size(header: &MpegHeader) -> usize {
+    if header.bitrate_kbps == 0 || header.sample_rate_hz == 0 {
+        return 0;
+    }
+    let samples_per_frame: usize = match header.layer {
+        MpegLayer::Layer1 => 384,
+        MpegLayer::Layer2 | MpegLayer::Layer3 => 1152,
+    };
+    if header.layer == MpegLayer::Layer1 {
+        ((samples_per_frame * header.bitrate_kbps as usize * 125) / header.sample_rate_hz as usize)
+            + (header.padding as usize * 4)
+    } else {
+        ((samples_per_frame * header.bitrate_kbps as usize * 125) / header.sample_rate_hz as usize)
+            + header.padding as usize
+    }
 }
 
     pub fn detect_id3v1(quats: &[Quat]) -> Option<Mp3HeaderKind> {
@@ -349,5 +414,246 @@ impl Mp3Inspector {
             | ((bytes[1] as usize & 0x7F) << 14)
             | ((bytes[2] as usize & 0x7F) << 7)
             | (bytes[3] as usize & 0x7F)
+    }
+}
+
+impl IncrementalMp3Parser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds a `QuatBuffer` incrementally and advances parsing state.
+    pub fn feed(&mut self, buffer: &QuatBuffer) {
+        let total_quats = buffer.len();
+        self.metrics.total_quats_inspected = total_quats;
+
+        let quats: Vec<Quat> = (0..total_quats).filter_map(|i| buffer.get(i)).collect();
+
+        // 1. Check ID3v2 once if we have enough quats for at least the 10-byte header (40 quats)
+        if self.id3v2_end_quats.is_none() && quats.len() >= 40 {
+            if quats.starts_with(&Mp3Inspector::ID3_PATTERN) {
+                self.metrics.id3v2_detected = true;
+                let tag_size_bytes = Mp3Inspector::parse_id3_size(&quats[24..40]);
+                let total_tag_quats = (10 + tag_size_bytes) * 4;
+                self.id3v2_end_quats = Some(total_tag_quats);
+                self.cursor_quats = total_tag_quats;
+
+                if quats.len() >= total_tag_quats {
+                    self.metadata = Self::parse_id3v2_frames(&quats[40..total_tag_quats]);
+                }
+            } else {
+                self.id3v2_end_quats = Some(0);
+            }
+        }
+
+        // 2. Search for MPEG frame starting from current cursor
+        if self.header.is_none() && self.cursor_quats + 16 <= quats.len() {
+            let mut pos = self.cursor_quats;
+            while pos + 16 <= quats.len() {
+                self.metrics.sync_attempts += 1;
+                if let Some(hdr) = Mp3Inspector::parse_mpeg_header(&quats[pos..pos + 16]) {
+                    if Mp3Inspector::verify_subsequent_frames(&quats, pos, &hdr) {
+                        let vbr = Self::parse_real_vbr_header(&quats, pos, &hdr);
+                        if vbr.is_some() {
+                            self.metrics.vbr_detected = true;
+                        }
+                        self.header = Some(hdr);
+                        self.frame_offset_quats = Some(pos);
+                        self.metrics.last_frame_offset_quats = Some(pos);
+                        self.vbr_info = vbr;
+                        self.cursor_quats = pos;
+                        break;
+                    }
+                    self.metrics.resync_skips += 1;
+                }
+                pos += 4;
+            }
+            if self.header.is_none() {
+                self.cursor_quats = pos;
+            }
+        }
+    }
+
+    pub fn parse_real_vbr_header(
+        quats: &[Quat],
+        frame_offset: usize,
+        header: &MpegHeader,
+    ) -> Option<VbrInfo> {
+        let side_info_quats = match header.version {
+            MpegVersion::Mpeg1 => 32 * 4,
+            MpegVersion::Mpeg2 | MpegVersion::Mpeg25 => 17 * 4,
+        };
+        let xing_start = frame_offset + 16 + side_info_quats;
+        if xing_start + 32 > quats.len() {
+            return None;
+        }
+
+        let tag_bytes = Self::read_bytes_from_quats(&quats[xing_start..xing_start + 16]);
+        let is_xing = &tag_bytes[0..4] == b"Xing";
+        let is_info = &tag_bytes[0..4] == b"Info";
+
+        if !is_xing && !is_info {
+    return None;
+}
+
+if tag_bytes.len() < 8 {
+    return None;
+}
+
+let flags: u32 = u32::from_be_bytes([
+    tag_bytes[4],
+    tag_bytes[5],
+    tag_bytes[6],
+    tag_bytes[7],
+]);
+
+        let mut cursor = 8usize;
+
+        let total_frames = if (flags & 0x0001) != 0 && cursor + 4 <= tag_bytes.len() {
+            let v = u32::from_be_bytes([
+                tag_bytes[cursor],
+                tag_bytes[cursor + 1],
+                tag_bytes[cursor + 2],
+                tag_bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            Some(v)
+        } else {
+            None
+        };
+
+        let total_bytes = if (flags & 0x0002) != 0 && cursor + 4 <= tag_bytes.len() {
+            let v = u32::from_be_bytes([
+                tag_bytes[cursor],
+                tag_bytes[cursor + 1],
+                tag_bytes[cursor + 2],
+                tag_bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            Some(v)
+        } else {
+            None
+        };
+
+        // Optional LAME header after TOC (100 bytes) + quality (4 bytes)
+        let mut encoder_delay = None;
+        let mut padding = None;
+        let lame_quats_start = xing_start + (cursor + 100 + 4) * 4;
+        if lame_quats_start + 24 <= quats.len() {
+            let lame_bytes = Self::read_bytes_from_quats(&quats[lame_quats_start..lame_quats_start + 24]);
+            if &lame_bytes[0..4] == b"LAME" && lame_bytes.len() >= 24 {
+                // Delay (12 bits) and padding (12 bits) packed in 3 bytes at offset 21..24
+                let b0 = lame_bytes[21] as u16;
+                let b1 = lame_bytes[22] as u16;
+                let b2 = lame_bytes[23] as u16;
+                encoder_delay = Some((b0 << 4) | (b1 >> 4));
+                padding = Some(((b1 & 0x0F) << 8) | b2);
+            }
+        }
+
+        Some(VbrInfo {
+            is_vbr: is_xing,
+            total_frames,
+            total_bytes,
+            encoder_delay,
+            padding,
+        })
+    }
+
+    pub fn parse_id3v2_frames(payload_quats: &[Quat]) -> ParsedId3v2Metadata {
+        let mut meta = ParsedId3v2Metadata::default();
+        let bytes = Self::read_bytes_from_quats(payload_quats);
+        let mut idx = 0usize;
+
+        while idx + 10 <= bytes.len() {
+            let frame_id = &bytes[idx..idx + 4];
+            if frame_id.iter().all(|&b| b == 0) {
+                break;
+            }
+            let frame_size = (((bytes[idx + 4] as usize) & 0x7F) << 21)
+                | (((bytes[idx + 5] as usize) & 0x7F) << 14)
+                | (((bytes[idx + 6] as usize) & 0x7F) << 7)
+                | ((bytes[idx + 7] as usize) & 0x7F);
+
+            idx += 10;
+            if frame_size == 0 || idx + frame_size > bytes.len() {
+                break;
+            }
+
+            let frame_data = &bytes[idx..idx + frame_size];
+            if let Some(text) = Self::decode_id3_text_frame(frame_data) {
+                match frame_id {
+                    b"TIT2" => meta.title = Some(text),
+                    b"TPE1" => meta.artist = Some(text),
+                    b"TALB" => meta.album = Some(text),
+                    b"TYER" | b"TDRC" => meta.year = Some(text),
+                    _ => {}
+                }
+            }
+            idx += frame_size;
+        }
+
+        meta
+    }
+
+    fn decode_id3_text_frame(data: &[u8]) -> Option<String> {
+        if data.is_empty() {
+            return None;
+        }
+        let encoding = data[0];
+        let body = &data[1..];
+        match encoding {
+            0 | 3 => {
+                // ISO-8859-1 or UTF-8
+                let trimmed = body.iter().position(|&b| b == 0).map_or(body, |p| &body[..p]);
+                Some(String::from_utf8_lossy(trimmed).trim().to_string())
+            }
+            1 | 2 => {
+                // UTF-16 with/without BOM
+                if body.len() < 2 {
+                    return None;
+                }
+                let little_endian = if encoding == 1 {
+                    body[0] == 0xFF && body[1] == 0xFE
+                } else {
+                    false
+                };
+                let start = if encoding == 1 && ((body[0] == 0xFF && body[1] == 0xFE) || (body[0] == 0xFE && body[1] == 0xFF)) {
+                    2
+                } else {
+                    0
+                };
+                let mut u16s = Vec::new();
+                let mut i = start;
+                while i + 1 < body.len() {
+                    let unit = if little_endian {
+                        u16::from_le_bytes([body[i], body[i + 1]])
+                    } else {
+                        u16::from_be_bytes([body[i], body[i + 1]])
+                    };
+                    if unit == 0 {
+                        break;
+                    }
+                    u16s.push(unit);
+                    i += 2;
+                }
+                String::from_utf16(&u16s).ok().map(|s| s.trim().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn read_bytes_from_quats(quats: &[Quat]) -> Vec<u8> {
+        let full_chunks = quats.len() / 4;
+        let mut out = Vec::with_capacity(full_chunks);
+        for c in 0..full_chunks {
+            let base = c * 4;
+            let b = (quats[base].value() << 6)
+                | (quats[base + 1].value() << 4)
+                | (quats[base + 2].value() << 2)
+                | quats[base + 3].value();
+            out.push(b);
+        }
+        out
     }
 }
